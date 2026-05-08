@@ -61,19 +61,35 @@ class GatingNetwork(nn.Module):
 
 class ExpertNetwork(nn.Module):
     """Base class for different expert architectures."""
-    def __init__(self, M, P=0, probabilistic=False, dtype=torch.float32):
+    def __init__(self, M, P=0, phi_dim=0, probabilistic=False, dtype=torch.float32):
         super().__init__()
         self.M = M
         self.P = P
+        self.phi_dim = phi_dim
         self.probabilistic = probabilistic
         self.dtype = dtype
+        if phi_dim > 0:
+            self.C = nn.Parameter(torch.zeros(M, phi_dim, dtype=dtype))
         
         # Parameter for probabilistic experts
         if probabilistic:
             self.sigma = nn.Parameter(torch.ones(1, dtype=dtype) * 0.05, requires_grad=True)
     
-    def forward(self, z):
+    def forward(self, z, phi_t=None):
         raise NotImplementedError("Subclasses must implement forward method")
+
+    def external_input(self, phi_t, batch_size):
+        if self.phi_dim == 0:
+            return 0.0
+        if phi_t is None:
+            raise ValueError("phi_t must be provided when phi_dim > 0")
+        if phi_t.dim() != 2:
+            raise ValueError(f"Expected phi_t with shape (phi_dim, batch_size), got {phi_t.shape}")
+        if phi_t.shape[0] != self.phi_dim or phi_t.shape[1] != batch_size:
+            raise ValueError(
+                f"Expected phi_t shape ({self.phi_dim}, {batch_size}), got {phi_t.shape}"
+            )
+        return self.C @ phi_t
     
     def add_noise(self, z):
         """Add stochasticity to the latent state if in probabilistic mode.
@@ -98,18 +114,24 @@ class ExpertNetwork(nn.Module):
 
 class AlmostLinearRNN(ExpertNetwork):
     """Almost linear RNN expert architecture."""
-    def __init__(self, M, P, probabilistic=False, dtype=torch.float32):
-        super().__init__(M, P, probabilistic, dtype=dtype)
+    def __init__(self, M, P, phi_dim=0, probabilistic=False, dtype=torch.float32):
+        super().__init__(M, P, phi_dim=phi_dim, probabilistic=probabilistic, dtype=dtype)
         self.A, self.W, self.h = self.initialize_A_W_h(M)
         
-    def forward(self, z):
+    def forward(self, z, phi_t=None):
         # z: (M, batch_size)
+        # phi_t: optional external input, shape (phi_dim, batch_size)
         # Split z into regular and ReLU parts
         z1 = z[:-self.P, :]
         z2 = F.relu(z[-self.P:, :])
         zcat = torch.cat([z1, z2], dim=0)
         
-        output = self.A.unsqueeze(-1) * z + self.W @ zcat + self.h.unsqueeze(-1)
+        output = (
+            self.A.unsqueeze(-1) * z
+            + self.W @ zcat
+            + self.h.unsqueeze(-1)
+            + self.external_input(phi_t, z.shape[1])
+        )
         
         # Add stochasticity if probabilistic
         if self.probabilistic:
@@ -125,20 +147,22 @@ class AlmostLinearRNN(ExpertNetwork):
 
 class ClippedShallowPLRNN(ExpertNetwork):
     """Clipped shallow PLRNN expert architecture."""
-    def __init__(self, M, hidden_dim=50, probabilistic=False, dtype=torch.float32):
-        super().__init__(M, hidden_dim, probabilistic, dtype=dtype)
+    def __init__(self, M, hidden_dim=50, phi_dim=0, probabilistic=False, dtype=torch.float32):
+        super().__init__(M, hidden_dim, phi_dim=phi_dim, probabilistic=probabilistic, dtype=dtype)
         self.A = torch.nn.Parameter(torch.diag(torch.tensor(self.normalized_positive_definite(M), dtype=self.dtype)))
         self.W1 = torch.nn.Parameter(self.gaussian_init(M, hidden_dim))
         self.W2 = torch.nn.Parameter(self.gaussian_init(hidden_dim, M))
         self.h1 = torch.nn.Parameter(torch.zeros(M, dtype=self.dtype))
         self.h2 = torch.nn.Parameter(torch.zeros(hidden_dim, dtype=self.dtype))
         
-    def forward(self, z):
+    def forward(self, z, phi_t=None):
         # z: (M, batch_size)
+        # phi_t: optional external input, shape (phi_dim, batch_size)
         W2z = self.W2 @ z
         output = (self.A.unsqueeze(-1) * z + 
                 self.W1 @ (F.relu(W2z + self.h2.unsqueeze(-1)) - F.relu(W2z)) + 
-                self.h1.unsqueeze(-1))
+                self.h1.unsqueeze(-1) +
+                self.external_input(phi_t, z.shape[1]))
         
         # Add stochasticity if probabilistic
         if self.probabilistic:
@@ -148,6 +172,7 @@ class ClippedShallowPLRNN(ExpertNetwork):
 
 class DynaMix(nn.Module):
     def __init__(self, M, N, Experts, P=2, hidden_dim=50, expert_type="almost_linear_rnn", 
+                 phi_dim=0,
                  probabilistic_expert=False, dtype=torch.float32):
         """
         Initialize a DynaMix model.
@@ -159,6 +184,7 @@ class DynaMix(nn.Module):
             P: Number of ReLU dimensions
             hidden_dim: Hidden dimension for clipped shallow PLRNN
             expert_type: Type of expert to use ("almost_linear_rnn" or "clipped_shallow_plrnn")
+            phi_dim: Dimension of known external parameter input phi_t
             probabilistic_expert: Whether to use probabilistic experts
             dtype: Data type for model parameters (default: torch.float32)
         """
@@ -171,9 +197,9 @@ class DynaMix(nn.Module):
         
         for _ in range(Experts):
             if expert_type == "almost_linear_rnn":
-                self.experts.append(AlmostLinearRNN(M, P, probabilistic=probabilistic_expert, dtype=dtype))
+                self.experts.append(AlmostLinearRNN(M, P, phi_dim=phi_dim, probabilistic=probabilistic_expert, dtype=dtype))
             elif expert_type == "clipped_shallow_plrnn":
-                self.experts.append(ClippedShallowPLRNN(M, hidden_dim, probabilistic=probabilistic_expert, dtype=dtype))
+                self.experts.append(ClippedShallowPLRNN(M, hidden_dim, phi_dim=phi_dim, probabilistic=probabilistic_expert, dtype=dtype))
             else:
                 raise ValueError(f"Unknown expert type: {expert_type}")
         
@@ -184,10 +210,12 @@ class DynaMix(nn.Module):
         self.P = P
         self.hidden_dim = hidden_dim
         self.M = M
+        self.phi_dim = phi_dim
 
-    def step(self, z, context, precomputed_cnn=None):
+    def step(self, z, context, phi_t=None, precomputed_cnn=None):
         # z: (M, batch_size)
         # context: (seq_length, batch_size, N)
+        # phi_t: optional external input, shape (phi_dim, batch_size)
         # precomputed_cnn: Optional precomputed CNN features
 
         # Compute expert weights
@@ -196,25 +224,26 @@ class DynaMix(nn.Module):
         
         # Compute expert outputs
         for i in range(self.Experts):
-            expert_output = self.experts[i](z)
+            expert_output = self.experts[i](z, phi_t=phi_t)
             results.append(expert_output * w_exp[i, :].unsqueeze(0))
         
         # Combine expert outputs
         return torch.sum(torch.stack(results, dim=0), dim=0)
 
-    def forward(self, z, context, precomputed_cnn=None):
+    def forward(self, z, context, phi_t=None, precomputed_cnn=None):
         """
         Forward pass through the DynaMix model.
         
         Args:
             z: Latent state of shape (M, batch_size)
             context: Context data of shape (seq_length, batch_size, N)
+            phi_t: Optional known external input of shape (phi_dim, batch_size)
             precomputed_cnn: Optional precomputed CNN features to avoid redundant computation for inference
             
         Returns:
             Updated latent state
         """
-        return self.step(z, context, precomputed_cnn=precomputed_cnn)
+        return self.step(z, context, phi_t=phi_t, precomputed_cnn=precomputed_cnn)
         
     def precompute_cnn(self, context):
         """
@@ -248,9 +277,9 @@ def print_model_parameters(model):
     print("Model Parameter Summary:")
     print(f"  Architecture: DynaMix with {model.expert_type} experts")
     if model.expert_type == "almost_linear_rnn":
-        print(f"  Dimensions: M={model.M}, N={model.N}, Experts={model.Experts}, P={model.P}")
+        print(f"  Dimensions: M={model.M}, N={model.N}, Experts={model.Experts}, P={model.P}, phi_dim={model.phi_dim}")
     else:
-        print(f"  Dimensions: M={model.M}, N={model.N}, Experts={model.Experts}, Hidden dim={model.hidden_dim}")
+        print(f"  Dimensions: M={model.M}, N={model.N}, Experts={model.Experts}, Hidden dim={model.hidden_dim}, phi_dim={model.phi_dim}")
     print(f"  Probabilistic experts: {model.probabilistic_expert}")
     
     # Count parameters

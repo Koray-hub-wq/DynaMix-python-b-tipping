@@ -134,7 +134,8 @@ class DynaMixForecaster:
     
     @torch.no_grad()
     def forecast(self, context, horizon, preprocessing_method="pos_embedding", 
-                standardize=True, fit_nonstationary=False, initial_x=None):
+                standardize=True, fit_nonstationary=False, initial_x=None,
+                phi_future=None):
         """
         Efficient batched forecasting with the DynaMix model.
         
@@ -152,6 +153,8 @@ class DynaMixForecaster:
             standardize: Whether to standardize the data (default: True)
             fit_nonstationary: Whether to fit a non-stationary time series (default: False)
             initial_x: Optional initial condition of shape (batch_size, feature_dim) or (feature_dim,)
+            phi_future: Optional known external input for generated steps with shape
+                (horizon, batch_size, phi_dim) or (horizon, phi_dim)
             
         Returns:
             Predicted sequence of shape (horizon, batch_size, feature_dim)
@@ -164,6 +167,29 @@ class DynaMixForecaster:
         
         # Apply context reshaping if needed
         context, initial_x, shape_metadata = self._reshape_for_model(context, initial_x, device)
+        if self.model.phi_dim > 0 and phi_future is None:
+            raise ValueError("phi_future must be provided when model.phi_dim > 0")
+        if phi_future is not None:
+            if not isinstance(phi_future, torch.Tensor):
+                phi_future = torch.tensor(phi_future, dtype=model_dtype, device=device)
+            else:
+                phi_future = phi_future.to(device=device, dtype=model_dtype)
+            if phi_future.dim() == 2:
+                phi_future = phi_future.unsqueeze(1)
+            if phi_future.dim() != 3:
+                raise ValueError(f"Expected phi_future with 2 or 3 dimensions, got {phi_future.shape}")
+            if phi_future.shape[0] != horizon:
+                raise ValueError(f"Expected phi_future horizon {horizon}, got {phi_future.shape[0]}")
+            if phi_future.shape[1] != shape_metadata[0]:
+                raise ValueError(
+                    f"Expected phi_future batch size {shape_metadata[0]}, got {phi_future.shape[1]}"
+                )
+            if phi_future.shape[2] != self.model.phi_dim:
+                raise ValueError(
+                    f"Expected phi_future phi_dim {self.model.phi_dim}, got {phi_future.shape[2]}"
+                )
+            if shape_metadata[2]:
+                raise ValueError("phi_future with automatic feature reshaping is not supported")
         
         # Create data preprocessor
         preprocessor = DataPreprocessor(
@@ -184,7 +210,8 @@ class DynaMixForecaster:
         with torch.amp.autocast(device_type='cuda' if device.type == 'cuda' else 'cpu', enabled=device.type == 'cuda'):
             precomputed_cnn = self.model.precompute_cnn(context_embedded)
             for t in range(horizon):
-                z = self.model(z, context_embedded, precomputed_cnn=precomputed_cnn)
+                phi_t = phi_future[t].t() if phi_future is not None else None
+                z = self.model(z, context_embedded, phi_t=phi_t, precomputed_cnn=precomputed_cnn)
                 Z_gen[t] = z
 
         # Step 4: Apply observation generation

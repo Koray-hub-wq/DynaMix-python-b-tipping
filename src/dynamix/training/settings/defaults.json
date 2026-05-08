@@ -5,6 +5,7 @@
         "pwl_units": 2,
         "expert_type": "almost_linear_rnn",
         "hidden_dim": 50,
+        "phi_dim": 0,
         "probabilistic_expert": false
     },
     "training": {
@@ -40,6 +41,9 @@
         "data_path": "/path/to/data.npy",
         "context_path": "/path/to/context.npy",
         "test_path": "/path/to/testdata.npy",
+        "phi_path": "",
+        "context_phi_path": "",
+        "test_phi_path": "",
         "save_path": "results/DynaMix-default"
     }
 }

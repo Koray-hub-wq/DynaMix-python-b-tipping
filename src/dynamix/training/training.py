@@ -66,9 +66,13 @@ def train_dynamix(model, dataset, optimizer, scheduler, args, printing=True, plo
     mase_steps = args.mase_steps
     lambda_reg = args.reg_strength
 
-    # Testing hyperparameters
-    context_length = 2000
-    prediction_steps = 10000
+    # Testing hyperparameters follow the loaded data instead of fixed defaults.
+    context_length = dataset.context_length
+    prediction_steps = dataset.test.shape[0] - context_length
+    if prediction_steps <= 0:
+        raise ValueError(
+            f"test length ({dataset.test.shape[0]}) must be greater than context length ({context_length})"
+        )
     plot_id = 0
     
     # Setup checkpoint directories using the utility function
@@ -93,8 +97,15 @@ def train_dynamix(model, dataset, optimizer, scheduler, args, printing=True, plo
         for _ in range(batches_per_epoch):
             optimizer.zero_grad()  # Reset gradients for the optimizer
             
-            x, y, context = dataset.sample_batch()  # Sample a batch of data (x: inputs, y: targets)
-            z_hat = predict_sequence_using_gtf(model, x, context, alpha, n_interleave)  # Predict sequence using teacher forcing
+            batch = dataset.sample_batch()
+            if dataset.phi is None:
+                x, y, context = batch
+                phi = None
+            else:
+                x, y, context, phi = batch
+            z_hat = predict_sequence_using_gtf(
+                model, x, context, alpha, n_interleave, phi=phi
+            )  # Predict sequence using teacher forcing
             
             # Calculate loss
             loss = loss_function(
@@ -129,7 +140,16 @@ def train_dynamix(model, dataset, optimizer, scheduler, args, printing=True, plo
                 
                 # Generate predictions
                 forecaster = DynaMixForecaster(model)
-                X_gen = forecaster.forecast(dataset.test[0:context_length,:,:], prediction_steps)
+                phi_future = (
+                    dataset.test_phi[context_length : context_length + prediction_steps, :, :]
+                    if dataset.test_phi is not None
+                    else None
+                )
+                X_gen = forecaster.forecast(
+                    dataset.test[0:context_length, :, :],
+                    prediction_steps,
+                    phi_future=phi_future,
+                )
                 
                 # Move tensors to CPU for metrics calculation
                 X_gen_cpu = X_gen.cpu() if X_gen.is_cuda else X_gen
@@ -211,7 +231,16 @@ def train_dynamix(model, dataset, optimizer, scheduler, args, printing=True, plo
     with torch.no_grad():
         # Generate final predictions
         forecaster = DynaMixForecaster(model)
-        X_gen = forecaster.forecast(dataset.test[0:context_length,:,:], prediction_steps)
+        phi_future = (
+            dataset.test_phi[context_length : context_length + prediction_steps, :, :]
+            if dataset.test_phi is not None
+            else None
+        )
+        X_gen = forecaster.forecast(
+            dataset.test[0:context_length, :, :],
+            prediction_steps,
+            phi_future=phi_future,
+        )
         
         # Move tensors to CPU for plotting     
         X_gen_cpu = X_gen.cpu() if X_gen.is_cuda else X_gen

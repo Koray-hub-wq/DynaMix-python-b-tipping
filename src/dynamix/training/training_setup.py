@@ -83,6 +83,8 @@ def parse_args():
     parser.add_argument('--probabilistic_expert', action='store_true', 
                         default=model_settings.get('probabilistic_expert', False),
                         help='Enable probabilistic experts with learnable noise')
+    parser.add_argument('--phi_dim', type=int, default=model_settings.get('phi_dim', 0),
+                        help='Dimension of known external parameter input phi_t. If 0, inferred from --phi_path when provided.')
     
     # Training arguments
     parser.add_argument('--batch_size', type=int, default=training_settings.get('batch_size', 16),
@@ -136,6 +138,12 @@ def parse_args():
                         help='Path to context data') # expected to be in form of a ($T_C$, $S$, $N$) NumPy array (.npy)
     parser.add_argument('--test_path', type=str, default=paths_settings.get('test_path', ''),
                         help='Path to test data') # Optional: expected to be in form of a ($T$, $S$, $N$) NumPy array (.npy)
+    parser.add_argument('--phi_path', type=str, default=paths_settings.get('phi_path', ''),
+                        help='Optional path to training external input phi_t with shape (T, S, phi_dim)')
+    parser.add_argument('--context_phi_path', type=str, default=paths_settings.get('context_phi_path', ''),
+                        help='Optional path to context external input phi_t with shape (T_context, S, phi_dim)')
+    parser.add_argument('--test_phi_path', type=str, default=paths_settings.get('test_phi_path', ''),
+                        help='Optional path to test external input phi_t with shape (T_test, S_test, phi_dim)')
     parser.add_argument('--save_path', type=str, default=paths_settings.get('save_path', 'results'),
                         help='Path to save results')
     
@@ -165,17 +173,35 @@ def training_setup():
     data = torch.tensor(np.load(args.data_path).astype(np.float32), device=device)
     context = torch.tensor(np.load(args.context_path).astype(np.float32), device=device)
     test = torch.tensor(np.load(args.test_path).astype(np.float32), device=device)
-    dataset = Dataset(data, context, test, batch_size=args.batch_size, noise_level=args.noise_level, device=device)
+    phi = torch.tensor(np.load(args.phi_path).astype(np.float32), device=device) if args.phi_path else None
+    context_phi = torch.tensor(np.load(args.context_phi_path).astype(np.float32), device=device) if args.context_phi_path else None
+    test_phi = torch.tensor(np.load(args.test_phi_path).astype(np.float32), device=device) if args.test_phi_path else None
+    dataset = Dataset(
+        data,
+        context,
+        test,
+        phi=phi,
+        context_phi=context_phi,
+        test_phi=test_phi,
+        batch_size=args.batch_size,
+        noise_level=args.noise_level,
+        device=device,
+    )
     print(f"Data shape: {dataset.X.shape}, Context shape: {dataset.context.shape}, Test shape: {dataset.test.shape}")
+    if dataset.phi is not None:
+        print(f"Phi shape: {dataset.phi.shape}, Test phi shape: {dataset.test_phi.shape if dataset.test_phi is not None else None}")
 
     # Initialize DynaMix model
+    phi_dim = dataset.phi_dim if dataset.phi is not None else args.phi_dim
     if args.expert_type == "almost_linear_rnn":
         model = DynaMix(M=args.latent_dim, P=args.pwl_units, N=context.shape[2], Experts=args.experts, 
                         expert_type=args.expert_type, hidden_dim=args.hidden_dim, 
+                        phi_dim=phi_dim,
                         probabilistic_expert=args.probabilistic_expert).to(device)
     elif args.expert_type == "clipped_shallow_plrnn":
         model = DynaMix(M=args.latent_dim, hidden_dim=args.hidden_dim, N=context.shape[2], Experts=args.experts, 
                         expert_type=args.expert_type, probabilistic_expert=args.probabilistic_expert, 
+                        phi_dim=phi_dim,
                         ).to(device)
     else:
         raise ValueError(f"Unknown expert type: {args.expert_type}")

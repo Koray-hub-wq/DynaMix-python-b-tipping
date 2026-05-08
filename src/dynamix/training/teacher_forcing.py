@@ -1,6 +1,6 @@
 import torch
 
-def predict_sequence_using_gtf(model, x, context, alpha, n_interleave):
+def predict_sequence_using_gtf(model, x, context, alpha, n_interleave, phi=None):
     """
     Predicts a sequence using teacher forcing (for training)
     
@@ -10,12 +10,21 @@ def predict_sequence_using_gtf(model, x, context, alpha, n_interleave):
         context: Context tensor of shape (seq_length, batch_size, N)
         alpha: Teacher forcing strength (0-1)
         n_interleave: Apply teacher forcing every n_interleave steps
+        phi: Optional known external input with shape
+            (seq_length, batch_size, phi_dim)
     
     Returns:
         Predicted sequence of shape (seq_length, batch_size, M)
     """
     seq_length, batch_size, N = x.shape
     device = x.device
+    if model.phi_dim > 0 and phi is None:
+        raise ValueError("phi must be provided when model.phi_dim > 0")
+    if phi is not None:
+        if phi.shape[0] != seq_length or phi.shape[1] != batch_size:
+            raise ValueError(f"phi shape {phi.shape} must match x time/batch dimensions {x.shape[:2]}")
+        if phi.shape[2] != model.phi_dim:
+            raise ValueError(f"Expected phi_dim={model.phi_dim}, got phi shape {phi.shape}")
     
     # Initialize prediction tensor on the same device
     Z = torch.empty(seq_length, batch_size, model.M, device=device)
@@ -38,7 +47,8 @@ def predict_sequence_using_gtf(model, x, context, alpha, n_interleave):
             z = teacher_force(z, x[t], alpha, N=N)
             
         # Update the latent state using the model
-        z = model(z, context)
+        phi_t = phi[t].t() if phi is not None else None
+        z = model(z, context, phi_t=phi_t)
         Z[t] = z.t()  # Store transposed z: (batch_size, M)
     
     return Z
