@@ -173,10 +173,14 @@ def train_dynamix(model, dataset, optimizer, scheduler, args, printing=True, plo
                         steps=mase_steps
                     ))
                 
-                # Store metrics
-                klx.append(torch.nanmedian(torch.tensor(klx_values, device=model.B.device)))
-                dh.append(torch.nanmedian(torch.tensor(dh_values, device=model.B.device)))
-                mase_values.append(torch.nanmedian(torch.tensor(mase_batch_values, device=model.B.device)))
+                # Store metrics as Python floats so matplotlib can plot them on CPU.
+                # Old CUDA-tensor version crashed during final plotting on GPU runs:
+                # klx.append(torch.nanmedian(torch.tensor(klx_values, device=model.B.device)))
+                # dh.append(torch.nanmedian(torch.tensor(dh_values, device=model.B.device)))
+                # mase_values.append(torch.nanmedian(torch.tensor(mase_batch_values, device=model.B.device)))
+                klx.append(torch.nanmedian(torch.tensor(klx_values)).item())
+                dh.append(torch.nanmedian(torch.tensor(dh_values)).item())
+                mase_values.append(torch.nanmedian(torch.tensor(mase_batch_values)).item())
                 ssi_epochs.append(e)
                 epoch_times.append(epoch_duration)  # Store epoch time
                 
