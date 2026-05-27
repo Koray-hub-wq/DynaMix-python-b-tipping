@@ -193,6 +193,7 @@ def training_setup():
 
     # Initialize DynaMix model
     phi_dim = dataset.phi_dim if dataset.phi is not None else args.phi_dim
+    args.phi_dim = phi_dim
     if args.expert_type == "almost_linear_rnn":
         model = DynaMix(M=args.latent_dim, P=args.pwl_units, N=context.shape[2], Experts=args.experts, 
                         expert_type=args.expert_type, hidden_dim=args.hidden_dim, 
