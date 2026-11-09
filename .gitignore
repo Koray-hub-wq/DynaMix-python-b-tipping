@@ -1,3 +1,52 @@
+# Keep source code, scripts, notebooks, documentation and configuration.
+# Directories stay traversable; generated directories are excluded below.
+*
+!*/
+!*.py
+!*.ipynb
+!*.sh
+!*.bash
+!*.ps1
+!*.bat
+!*.cmd
+!*.md
+!*.rst
+!*.txt
+!*.json
+!*.toml
+!*.yaml
+!*.yml
+!*.ini
+!*.cfg
+!LICENSE
+!LICENSE.*
+!COPYING*
+!NOTICE*
+!Makefile
+!Dockerfile
+!.gitignore
+!.gitattributes
+!.gitmodules
+!.editorconfig
+
+# Generated data and results, including JSON/config files inside these folders.
+results/
+outputs/
+training_data/
+datasets/
+checkpoints/
+plots/
+figures/
+images/
+wandb/
+mlruns/
+lightning_logs/
+tensorboard/
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

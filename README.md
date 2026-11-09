@@ -157,6 +157,11 @@ pe = MASE(ground_truth_tensor, reconstruction_tensor, steps=10)
 
 ## Training the Model
 
+For the Halvorsen experiment comparing a context fixed at phi=-0.75 with the
+true target context, including six server training runs, all-nine-parameter
+test forecasts and bifurcation diagrams, see
+[experiments/halvorsen_context](experiments/halvorsen_context/README.md).
+
 ### Training Algorithm
 
 DynaMix is trained using backpropagation through time with sparse teacher forcing (STF), a technique that balances stability and learning:

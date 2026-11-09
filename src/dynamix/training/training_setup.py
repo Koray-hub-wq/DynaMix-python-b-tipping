@@ -8,6 +8,7 @@ import torch.nn as nn
 import argparse
 import json
 import os
+import random
 from pathlib import Path
 
 from ..model.dynamix import DynaMix, print_model_parameters
@@ -146,6 +147,13 @@ def parse_args():
                         help='Optional path to test external input phi_t with shape (T_test, S_test, phi_dim)')
     parser.add_argument('--save_path', type=str, default=paths_settings.get('save_path', 'results'),
                         help='Path to save results')
+    parser.add_argument('--test_context_path', default='', help='Separate evaluation context array.')
+    parser.add_argument('--test_initial_index', type=int, default=None,
+                        help='Initialize from this test point and score from the next point.')
+    parser.add_argument('--no_eval_standardize', action='store_true',
+                        help='Disable additional context standardization for already standardized data.')
+    parser.add_argument('--clean_initial_state', action='store_true',
+                        help='Keep the first target observation unchanged by training noise.')
     
     return parser.parse_args()
 
@@ -155,6 +163,7 @@ def training_setup():
     args = parse_args()
     
     np.random.seed(args.seed)
+    random.seed(args.seed)
     torch.manual_seed(args.seed)
     if args.device == 'cuda':
         torch.cuda.manual_seed(args.seed)
@@ -176,6 +185,8 @@ def training_setup():
     phi = torch.tensor(np.load(args.phi_path).astype(np.float32), device=device) if args.phi_path else None
     context_phi = torch.tensor(np.load(args.context_phi_path).astype(np.float32), device=device) if args.context_phi_path else None
     test_phi = torch.tensor(np.load(args.test_phi_path).astype(np.float32), device=device) if args.test_phi_path else None
+    if args.test_context_path and args.test_initial_index is None:
+        raise ValueError('--test_context_path requires --test_initial_index')
     dataset = Dataset(
         data,
         context,
@@ -186,6 +197,8 @@ def training_setup():
         batch_size=args.batch_size,
         noise_level=args.noise_level,
         device=device,
+        test_context=np.load(args.test_context_path) if args.test_context_path else None,
+        clean_initial_state=args.clean_initial_state,
     )
     print(f"Data shape: {dataset.X.shape}, Context shape: {dataset.context.shape}, Test shape: {dataset.test.shape}")
     if dataset.phi is not None:

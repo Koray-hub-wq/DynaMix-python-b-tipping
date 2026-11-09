@@ -68,7 +68,13 @@ def train_dynamix(model, dataset, optimizer, scheduler, args, printing=True, plo
 
     # Testing hyperparameters follow the loaded data instead of fixed defaults.
     context_length = dataset.context_length
-    prediction_steps = dataset.test.shape[0] - context_length
+    initial_index = getattr(args, 'test_initial_index', None)
+    prediction_start = context_length if initial_index is None else initial_index + 1
+    if initial_index is not None and not context_length <= initial_index < dataset.test.shape[0] - 1:
+        raise ValueError('test_initial_index must follow the context and leave prediction steps')
+    evaluation_context = dataset.test_context if dataset.test_context is not None else dataset.test[:context_length]
+    prediction_steps = dataset.test.shape[0] - prediction_start
+    phi_start = context_length if initial_index is None else initial_index
     if prediction_steps <= 0:
         raise ValueError(
             f"test length ({dataset.test.shape[0]}) must be greater than context length ({context_length})"
@@ -141,14 +147,16 @@ def train_dynamix(model, dataset, optimizer, scheduler, args, printing=True, plo
                 # Generate predictions
                 forecaster = DynaMixForecaster(model)
                 phi_future = (
-                    dataset.test_phi[context_length : context_length + prediction_steps, :, :]
+                    dataset.test_phi[phi_start : phi_start + prediction_steps, :, :]
                     if dataset.test_phi is not None
                     else None
                 )
                 X_gen = forecaster.forecast(
-                    dataset.test[0:context_length, :, :],
+                    evaluation_context,
                     prediction_steps,
                     phi_future=phi_future,
+                    initial_x=dataset.test[initial_index] if initial_index is not None else None,
+                    standardize=not getattr(args, 'no_eval_standardize', False),
                 )
                 
                 # Move tensors to CPU for metrics calculation
@@ -161,15 +169,15 @@ def train_dynamix(model, dataset, optimizer, scheduler, args, printing=True, plo
                 # Calculate metrics using parameters from settings
                 for eval_id in range(dataset.test.shape[1]):
                     klx_values.append(geometrical_misalignment(
-                        X_gen_cpu[:,eval_id,:], test_data_cpu[context_length:context_length+prediction_steps,eval_id,:], 
+                        X_gen_cpu[:,eval_id,:], test_data_cpu[prediction_start:prediction_start+prediction_steps,eval_id,:],
                         n_bins=n_bins
                     ))
                     dh_values.append(temporal_misalignment(
-                        X_gen_cpu[:,eval_id,:], test_data_cpu[context_length:context_length+prediction_steps,eval_id,:], 
+                        X_gen_cpu[:,eval_id,:], test_data_cpu[prediction_start:prediction_start+prediction_steps,eval_id,:],
                         smoothing=ps_smoothing
                     ))
                     mase_batch_values.append(MASE(
-                        test_data_cpu[context_length:context_length+prediction_steps,eval_id,:], X_gen_cpu[:,eval_id,:], 
+                        test_data_cpu[prediction_start:prediction_start+prediction_steps,eval_id,:], X_gen_cpu[:,eval_id,:],
                         steps=mase_steps
                     ))
                 
@@ -190,7 +198,7 @@ def train_dynamix(model, dataset, optimizer, scheduler, args, printing=True, plo
                 # Generate simple trajectory plot if plotting is enabled
                 if plotting:
                     # Move data to CPU for plotting
-                    real_trajectory = dataset.test[context_length:context_length+prediction_steps, plot_id, :].cpu()
+                    real_trajectory = dataset.test[prediction_start:prediction_start+prediction_steps, plot_id, :].cpu()
                     predicted_trajectory = X_gen[:,plot_id,:].cpu()
                     plot_trajectories(real_trajectory, predicted_trajectory, plots_dir, f"epoch_{e}_")
                 
@@ -236,19 +244,21 @@ def train_dynamix(model, dataset, optimizer, scheduler, args, printing=True, plo
         # Generate final predictions
         forecaster = DynaMixForecaster(model)
         phi_future = (
-            dataset.test_phi[context_length : context_length + prediction_steps, :, :]
+            dataset.test_phi[phi_start : phi_start + prediction_steps, :, :]
             if dataset.test_phi is not None
             else None
         )
         X_gen = forecaster.forecast(
-            dataset.test[0:context_length, :, :],
+            evaluation_context,
             prediction_steps,
             phi_future=phi_future,
+            initial_x=dataset.test[initial_index] if initial_index is not None else None,
+            standardize=not getattr(args, 'no_eval_standardize', False),
         )
         
         # Move tensors to CPU for plotting     
         X_gen_cpu = X_gen.cpu() if X_gen.is_cuda else X_gen
-        real_trajectory = dataset.test[context_length:context_length+prediction_steps, plot_id, :].cpu()
+        real_trajectory = dataset.test[prediction_start:prediction_start+prediction_steps, plot_id, :].cpu()
         predicted_trajectory = X_gen_cpu[:,plot_id,:]
         
         # Plot metrics

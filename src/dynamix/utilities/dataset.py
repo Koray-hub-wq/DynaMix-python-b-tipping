@@ -23,6 +23,8 @@ class Dataset:
         noise_level=0.05,
         device=None,
         dtype=torch.float32,
+        test_context=None,
+        clean_initial_state=False,
     ):
         """
         Initialize the dataset with training, context, and test data.
@@ -45,6 +47,9 @@ class Dataset:
             noise_level: Standard deviation of Gaussian noise added
             device: Device to store tensors on (e.g., 'cpu', 'cuda')
             dtype: Data type to use for tensors (defaults to torch.float32)
+            test_context: Optional separate evaluation context, shaped
+                (context_length, num_test_sequences, N).
+            clean_initial_state: Keep the initial target point free of added noise.
             
         Raises:
             ValueError: If data dimensions are incompatible
@@ -135,6 +140,14 @@ class Dataset:
         self.context_length = self.context.shape[0]
         self.feature_dim = self.X.shape[2]
         self.phi_dim = 0 if self.phi is None else self.phi.shape[2]
+        self.clean_initial_state = clean_initial_state
+        self.test_context = None
+        if test_context is not None:
+            test_context = torch.as_tensor(test_context, dtype=self.dtype, device=self.device)
+            expected = (self.context_length, self.test.shape[1], self.feature_dim)
+            if tuple(test_context.shape) != expected:
+                raise ValueError(f'Expected test_context shape {expected}, got {tuple(test_context.shape)}')
+            self.test_context = test_context.clone().detach()
         
     def __getitem__(self, idx):
         """
@@ -210,7 +223,10 @@ class Dataset:
         Context = torch.stack(Context).permute(1, 0, 2)  # Shape: (context_length, batch_size, N)
         
         # Add Gaussian noise
-        X = X + torch.randn_like(X) * self.noise_level
+        noise = torch.randn_like(X) * self.noise_level
+        if self.clean_initial_state:
+            noise[0] = 0
+        X = X + noise
 
         if self.phi is None:
             return X, Y, Context
