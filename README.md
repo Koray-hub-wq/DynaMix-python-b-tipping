@@ -157,6 +157,11 @@ pe = MASE(ground_truth_tensor, reconstruction_tensor, steps=10)
 
 ## Training the Model
 
+For a context-free ablation with frozen random mixture weights, 10/40 AL-RNN
+experts (PWL=2), six Halvorsen training runs, bifurcation diagrams and all-nine-
+parameter trajectory comparisons, see
+[experiments/halvorsen_fixed_mixture](experiments/halvorsen_fixed_mixture/README.md).
+
 For the Halvorsen experiment comparing a context fixed at phi=-0.75 with the
 true target context, including six server training runs, all-nine-parameter
 test forecasts and bifurcation diagrams, see
