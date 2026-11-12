@@ -194,7 +194,26 @@ Die Testauswertung umfasst alle neun Parameter und alle vorhandenen Serien
 `x[80000]`. Erster bewerteter Punkt ist `x[80001]`. Die 3D-Grafiken zeigen pro
 φ die erste Quellserie, für alle Modelle dieselbe. Die NPZ-Dateien enthalten
 alle Serien. `summary.csv` enthält Median-Dstsp, DH, MASE, MSE über die ersten
-200 Schritte sowie die Anzahl nichtendlicher Vorhersagen und den Trainingsstatus.
+200 Schritte sowie die Anzahl nichtendlicher und divergierter Vorhersagen und den Trainingsstatus.
+
+Als divergiert gilt eine Vorhersage ab dem ersten nichtendlichen Wert oder einer
+Beobachtungskoordinate mit Betrag über `1e6` (die Daten sind standardisiert).
+`metrics.json` dokumentiert `diverged`, den ersten betroffenen Vorhersageschritt
+(ab 1 gezählt) und den maximalen endlichen Betrag. Die Grafiken zeigen nur den
+Präfix davor und markieren den Abbruch ausdrücklich. Die vollständigen
+Rohvorhersagen in `predictions.npz` bleiben unverändert. Achsengrenzen werden
+in Float64 berechnet, damit große Float32-Werte keinen Plot-Abbruch verursachen.
+Dstsp und DH werden für divergierte Rollouts nicht berechnet; MASE über die
+ersten 10 und MSE über die ersten 200 Schritte bleiben erhalten, sofern der
+jeweilige kurze Horizont noch nicht divergiert. `summary.csv` zählt betroffene
+Serien in `n_diverged`; fehlende Langzeitmetriken sind kein erfolgreicher Rollout.
+Auch die Bifurkationsanalyse kennzeichnet solche Rollouts in `diagnostics.json`
+und nimmt ihre Maxima nicht in das Diagramm auf.
+
+Nach einem Auswertungsabbruch denselben `run_all.sh`-Befehl erneut starten,
+sobald die korrigierte `evaluate.py` auf dem Server liegt. Bereits abgeschlossene
+Trainings mit passenden Einstellungen werden übersprungen. Der Plot-Fix ändert
+keine Trainingsparameter oder Trainingsdateien.
 
 Die Bifurkationsanalyse simuliert standardmäßig 320 φ-Werte von -1 bis 1 mit
 dem bestehenden Halvorsen-ODE-Backend. Sie verwendet die tatsächliche affine

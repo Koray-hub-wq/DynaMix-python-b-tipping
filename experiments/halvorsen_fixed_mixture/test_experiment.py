@@ -18,7 +18,8 @@ import torch
 from common import FixedMixture, SPLITS, Trajectories, load_run
 import train
 import run
-from evaluate import merge_expert_caches
+from evaluate import (merge_expert_caches, measure, plot_trajectories,
+                      plotting_prediction, rollout_status, trajectory_limits)
 
 torch.set_num_threads(1)
 
@@ -38,6 +39,59 @@ def make_source(directory):
 
 
 class FixedMixtureTests(unittest.TestCase):
+    def test_extreme_float32_axis_limits_do_not_overflow(self):
+        extreme = np.finfo(np.float32).max
+        values = np.array([[-extreme] * 3, [extreme] * 3], dtype=np.float32)
+        with np.errstate(over='raise', invalid='raise'):
+            limits = trajectory_limits(np.zeros((2, 3), dtype=np.float32), values)
+        self.assertTrue(np.isfinite(list(limits.values())).all())
+        self.assertLess(limits['zlim'][0], -float(extreme))
+
+    def test_divergence_diagnostics_preserve_valid_short_horizon_metrics(self):
+        t = np.linspace(0, 12, 260)
+        truth = np.stack((np.sin(t), np.cos(t), np.sin(2 * t)), axis=1).astype(np.float32)
+        prediction = truth.copy()
+        prediction[220:, 2] = -np.finfo(np.float32).max
+        with np.errstate(over='raise', invalid='raise'):
+            row = measure(prediction, truth)
+            prefix, note = plotting_prediction(prediction)
+        self.assertTrue(row['finite'])
+        self.assertTrue(row['diverged'])
+        self.assertEqual(row['first_divergence_step'], 221)
+        self.assertEqual(row['mse_200'], 0)
+        self.assertEqual(row['mase'], 0)
+        self.assertIsNone(row['dstsp'])
+        self.assertIsNone(row['dh'])
+        self.assertEqual(len(prefix), 220)
+        self.assertIn('DIVERGED', note)
+        prediction[0] = np.nan
+        self.assertFalse(rollout_status(prediction)['finite'])
+        self.assertEqual(len(plotting_prediction(prediction)[0]), 0)
+        prediction[:] = 0
+        self.assertFalse(rollout_status(prediction)['diverged'])
+
+    def test_all_nine_plots_survive_huge_nan_and_infinite_rollouts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = np.linspace(0, 8, 60)
+            target = np.stack((np.sin(t), np.cos(t), np.sin(2 * t)), axis=1).astype(np.float32)
+            truth = np.repeat(target[:, None], 9, axis=1)
+            prediction = truth.copy()
+            prediction[20:, 0] = np.finfo(np.float32).max
+            prediction[20:, 1] = -np.finfo(np.float32).max
+            prediction[20:, 2] = np.inf
+            prediction[:, 3] = np.nan
+            prediction[:, 4] = np.inf
+            prediction[:, 5] = -np.inf
+            prediction[30:, 6] = 1e37
+            original = prediction.copy()
+            data = SimpleNamespace(values=np.arange(-1, 1.01, .25),
+                                   raw_values=1.75 + .35 * np.arange(-1, 1.01, .25))
+            with np.errstate(over='raise', invalid='raise'):
+                plot_trajectories(Path(tmp), prediction, truth, data,
+                                  {'split': 'negative3', 'label': 'divergence_regression'})
+            self.assertEqual(len(list(Path(tmp).glob('*.png'))), 11)
+            np.testing.assert_array_equal(prediction, original)
+
     def test_explicit_expert_sum_outputs_and_gradients(self):
         for count in (10, 40):
             torch.manual_seed(8)

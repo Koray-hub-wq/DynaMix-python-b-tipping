@@ -19,6 +19,41 @@ from common import (DEFAULT_SOURCE, SPLITS, Trajectories, configure,
                     forecast_numpy, load_run, sha256, write_json)
 from dynamix.metrics.metrics import geometrical_misalignment, temporal_misalignment, MASE
 
+MAX_ROLLOUT_ABS = 1e6  # standardized coordinates; diagnostics only, never clip raw forecasts
+
+
+def rollout_status(prediction):
+    values = np.asarray(prediction, dtype=np.float64)
+    finite = np.isfinite(values)
+    valid_steps = np.all(finite & (np.abs(values) <= MAX_ROLLOUT_ABS), axis=1)
+    bad = np.flatnonzero(~valid_steps)
+    finite_values = np.abs(values[finite])
+    return {'finite': bool(finite.all()), 'diverged': bool(len(bad)),
+            'first_divergence_step': int(bad[0] + 1) if len(bad) else None,
+            'max_abs_prediction': float(finite_values.max()) if finite_values.size else None}
+
+
+def plotting_prediction(prediction):
+    """Draw only the prefix before divergence; preserve raw arrays on disk."""
+    status = rollout_status(prediction)
+    end = status['first_divergence_step']
+    prefix = np.asarray(prediction, dtype=np.float64)[:end - 1] if end is not None else np.asarray(prediction, dtype=np.float64)
+    note = f'DIVERGED at step {end}; showing prefix' if end is not None else ''
+    return prefix, note
+
+
+def trajectory_limits(target, prediction):
+    # Float64 is essential: even finite float32 endpoints can overflow when
+    # computing their span or padded limits (the original server crash).
+    combined = np.concatenate((target, prediction)).astype(np.float64)
+    finite = combined[np.isfinite(combined).all(axis=1)]
+    if not len(finite):
+        return {}
+    low, high = finite.min(axis=0), finite.max(axis=0)
+    padding = np.maximum((high - low) * .03, 1e-3)
+    return {name: (float(low[i] - padding[i]), float(high[i] + padding[i]))
+            for i, name in enumerate(('xlim', 'ylim', 'zlim'))}
+
 
 def load_backend(directory):
     """Reuse the exact ODE/standardization/peaks/plots of the existing experiments."""
@@ -48,18 +83,22 @@ def load_runs(args, data, device):
 
 
 def measure(prediction, truth):
-    finite = bool(np.isfinite(prediction).all())
-    row = {'finite': finite, 'dstsp': None, 'dh': None, 'mase': None, 'mse_200': None}
-    if finite:
-        pred, target = torch.from_numpy(prediction.copy()), torch.from_numpy(truth.copy())
-        for name, value in (
-            ('dstsp', geometrical_misalignment(pred, target, n_bins=30)),
-            ('dh', temporal_misalignment(pred, target, smoothing=20)),
-            ('mase', MASE(pred, target, steps=10)),
-            ('mse_200', torch.mean((pred[:200] - target[:200]) ** 2)),
-        ):
-            scalar = float(value)
-            row[name] = scalar if np.isfinite(scalar) else None
+    row = {**rollout_status(prediction), 'dstsp': None, 'dh': None, 'mase': None, 'mse_200': None}
+    pred = torch.from_numpy(np.array(prediction, dtype=np.float64))
+    target = torch.from_numpy(np.array(truth, dtype=np.float64))
+    results = []
+    # Short-horizon errors remain meaningful if divergence occurs later.
+    if not rollout_status(prediction[:200])['diverged']:
+        results.append(('mse_200', torch.mean((pred[:200] - target[:200]) ** 2)))
+    if not rollout_status(prediction[:10])['diverged']:
+        results.append(('mase', MASE(pred, target, steps=10)))
+    if not row['diverged']:
+        results.append(('dstsp', geometrical_misalignment(pred, target, n_bins=30)))
+        with np.errstate(divide='ignore', invalid='ignore', over='ignore'):
+            results.append(('dh', temporal_misalignment(pred, target, smoothing=20)))
+    for name, value in results:
+        scalar = float(value)
+        row[name] = scalar if np.isfinite(scalar) else None
     return row
 
 
@@ -71,7 +110,10 @@ def plot_trajectories(directory, prediction, truth, data, run):
         index = int(np.flatnonzero(np.isclose(data.values, value, atol=1e-5, rtol=0))[0])
         seen = any(np.isclose(value, SPLITS[run['split']], atol=1e-5, rtol=0))
         title = f'phi={value:g}, a={data.raw_values[index]:.4g} ({"train" if seen else "unseen"})'
-        target, pred = truth[:, index], prediction[:, index]
+        target = np.asarray(truth[:, index], dtype=np.float64)
+        pred, note = plotting_prediction(prediction[:, index])
+        if note:
+            title += f'\n{note}'
         ax = overview.add_subplot(3, 3, panel + 1, projection='3d')
         ax.plot(*target.T, color='black', lw=.45, alpha=.6, label='Ground truth')
         ax.plot(*pred.T, color='tab:red', lw=.45, alpha=.7, label='Fixed mixture')
@@ -80,26 +122,21 @@ def plot_trajectories(directory, prediction, truth, data, run):
             ax.legend(fontsize=7)
         ts = axes.flat[panel]
         length = min(1000, len(pred))
-        ts.plot(target[:length, 2], color='black', lw=.7, label='Ground truth')
+        ts.plot(target[:min(1000, len(target)), 2], color='black', lw=.7, label='Ground truth')
         ts.plot(pred[:length, 2], color='tab:red', lw=.7, label='Fixed mixture')
         ts.set(title=title, xlabel='Forecast step', ylabel='z')
         if panel == 0:
             ts.legend(fontsize=7)
         comparison = plt.figure(figsize=(11, 5))
+        limits = trajectory_limits(target, pred)
         for position, (trajectory, name, color) in enumerate(((target, 'Ground truth', 'black'),
                                                            (pred, 'Fixed mixture', 'tab:red')), start=1):
             ax3d = comparison.add_subplot(1, 2, position, projection='3d')
             ax3d.plot(*trajectory.T, color=color, lw=.5)
             ax3d.set(title=name, xlabel='x', ylabel='y', zlabel='z')
-            # Common bounds from finite observations allow direct shape comparison.
-            combined = np.concatenate((target, pred))
-            finite = combined[np.isfinite(combined).all(axis=1)]
-            if len(finite):
-                low, high = finite.min(axis=0), finite.max(axis=0)
-                padding = np.maximum((high - low) * .03, 1e-3)
-                ax3d.set(xlim=(low[0] - padding[0], high[0] + padding[0]),
-                         ylim=(low[1] - padding[1], high[1] + padding[1]),
-                         zlim=(low[2] - padding[2], high[2] + padding[2]))
+            ax3d.set(**limits)
+            if position == 2 and note:
+                ax3d.text2D(.02, .95, note, transform=ax3d.transAxes, color='tab:red', fontsize=8)
             ax3d.set_box_aspect((1, 1, 1))
         comparison.suptitle(f'{run["label"]}: {title}; source series {index}')
         comparison.tight_layout()
@@ -137,7 +174,8 @@ def trajectories(args, data, runs, device):
         for value in np.arange(-1, 1.01, .25):
             group = [row for row in rows if np.isclose(row['phi'], value, atol=1e-5, rtol=0)]
             aggregate = {'run': run['label'], 'phi': float(value), 'seen_in_training': group[0]['seen_in_training'],
-                         'n_trajectories': len(group), 'n_nonfinite': sum(not row['finite'] for row in group)}
+                         'n_trajectories': len(group), 'n_nonfinite': sum(not row['finite'] for row in group),
+                         'n_diverged': sum(row['diverged'] for row in group)}
             for name in ('dstsp', 'dh', 'mase', 'mse_200'):
                 valid = [row[name] for row in group if row[name] is not None]
                 aggregate[f'median_{name}'] = float(np.median(valid)) if valid else None
@@ -253,12 +291,12 @@ def bifurcations(args, data, runs, device):
                                              args.forecast_steps, device, args.batch_size)
                 for local, global_index in enumerate(range(start, end)):
                     parameter_index = int(parameter_indices[global_index])
-                    finite = bool(np.isfinite(prediction[:, local]).all())
+                    status = rollout_status(prediction[:, local])
                     diagnostics.append({'run': run['label'], 'parameter_index': parameter_index,
                                         'phi': float(values[global_index]), 'rollout': global_index % args.rollouts,
-                                        'finite': finite})
+                                        **status})
                     for component, index in base.COMPONENTS.items():
-                        peaks = base.local_maxima(prediction[args.discard_steps:, local, index]) if finite else np.empty(0)
+                        peaks = base.local_maxima(prediction[args.discard_steps:, local, index]) if not status['diverged'] else np.empty(0)
                         collected[component][parameter_index].append(peaks)
                 print(f'{run["label"]}: bifurcation rollouts {end}/{len(initial)}', flush=True)
             for component in base.COMPONENTS:
@@ -327,7 +365,8 @@ def main(argv=None):
     runs = load_runs(args, data, device)
     args.output.mkdir(parents=True, exist_ok=True)
     write_json(args.output / 'evaluation_settings.json',
-               {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()})
+               {**{key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()},
+                'divergence_abs_limit': MAX_ROLLOUT_ABS})
     if args.task == 'trajectories':
         trajectories(args, data, runs, device)
     else:
